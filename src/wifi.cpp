@@ -31,7 +31,8 @@ void setupWiFi() {
 
 void sendWiFi(const uint8_t *buf, int len) {
     if (WiFi.softAPIP() == IPAddress(0, 0, 0, 0) && WiFi.status() != WL_CONNECTED) return;
-    // 获取远程 IP
+	// 2026.3.14为提高连接稳定性，添加此行检查AP模式下是否有客户端连接
+	// 获取远程 IP
     IPAddress targetIP = udp.remoteIP();
     // 如果远程 IP 是 0.0.0.0 (表示还没收到过包)，则使用广播地址
     if (targetIP == IPAddress(0, 0, 0, 0)) {
