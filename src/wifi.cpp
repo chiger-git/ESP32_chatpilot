@@ -24,6 +24,7 @@ WiFiUDP udp;
 
 void setupWiFi() {
 	print("Setup Wi-Fi\n");
+	WiFi.mode(WIFI_AP);// 2026.3.14为提高连接稳定性，添加此行设置为AP模式
 	WiFi.softAP(WIFI_SSID, WIFI_PASSWORD);
 	udp.begin(WIFI_UDP_PORT);
 }
