@@ -12,8 +12,7 @@
 #include "vector.h"
 #include "quaternion.h"
 #include "util.h"
-
-
+#include "voice/voice.h"
 
 // 外部函数声明
 void setupParameters();
@@ -61,6 +60,7 @@ void setup() {
 #endif
 	setupIMU();
 	setupRC();
+	voice_init();
 	setLED(false);
 	print("初始化完成！\n");
 }
@@ -73,6 +73,7 @@ void loop() {
 	control();
 	sendMotors();
 	handleInput();
+	voice_read_command();
 #if WIFI_ENABLED
 	processMavlink();
 #endif
