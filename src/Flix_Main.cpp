@@ -13,6 +13,7 @@
 #include "quaternion.h"
 #include "util.h"
 #include "voice/voice.h"
+#include "rcwl_1605/rcwl_1605.h"
 
 // 外部函数声明
 void setupParameters();
@@ -61,12 +62,14 @@ void setup() {
 	setupIMU();
 	setupRC();
 	voice_init();
+	setupRCWL1605();
 	setLED(false);
 	print("初始化完成！\n");
 }
 
 void loop() {
 	readIMU();
+	readRCWL1605();
 	step();
 	readRC();
 	estimate();

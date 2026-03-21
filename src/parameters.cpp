@@ -46,7 +46,19 @@ struct Parameter {
 	float value; // cache
 };
 
+// 外部声明，从 control.cpp 引入
+extern float hoverThrottle;
+extern class PID altPid;
+extern class PID velZPid;
+
 Parameter parameters[] = {
+	// altitude (定高相关的参数注册，最大名字15个字符)
+	{"ALT_HOVER_THR", &hoverThrottle},
+	{"ALT_POS_P", &altPid.p},
+	{"ALT_VEL_P", &velZPid.p},
+	{"ALT_VEL_I", &velZPid.i},
+	{"ALT_VEL_D", &velZPid.d},
+
 	// control
 	{"CTL_R_RATE_P", &rollRatePID.p},
 	{"CTL_R_RATE_I", &rollRatePID.i},

@@ -300,6 +300,33 @@ void handleMavlink(const void *_msg) {
 			mode = m.param2;
 		}
 
+		// 拦截：一键定高起飞指令 
+		if (m.command == MAV_CMD_NAV_TAKEOFF) {
+			extern bool alt_hold_enabled;
+			extern float alt_target;
+			extern float controlRoll, controlPitch, controlYaw;
+			
+			// param7 为 MAV_CMD_NAV_TAKEOFF 规定的高度参数 (m)
+			if (m.param7 > 0.05f) {
+				alt_target = m.param7; // 获取设定高度
+
+				// 切断当前所有的手柄摇杆与水平偏移，保证纯净直上直下
+				controlRoll = 0.0f;
+				controlPitch = 0.0f;
+				controlYaw = 0.0f;
+
+				alt_hold_enabled = true; // 强制交出油门控制权
+				accepted = true;
+			}
+		}
+
+		// 拦截：一键降落保命强退指令 (交给物理遥杆，这里提供指令退出的能力)
+		if (m.command == MAV_CMD_NAV_LAND) {
+			extern bool alt_hold_enabled;
+			alt_hold_enabled = false; 
+			accepted = true;
+		}
+
 		// send command ack
 		mavlink_message_t ack;
 		mavlink_msg_command_ack_pack(SYSTEM_ID, MAV_COMP_ID_AUTOPILOT1, &ack, m.command, accepted ? MAV_RESULT_ACCEPTED : MAV_RESULT_UNSUPPORTED, UINT8_MAX, 0, msg.sysid, msg.compid);

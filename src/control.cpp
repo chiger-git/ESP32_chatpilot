@@ -10,6 +10,16 @@
 #include "lpf.h"
 #include "util.h"
 
+// 高度闭环数据与 PID 初始化
+extern float alt_est; 
+extern float vz_est;
+bool alt_hold_enabled = false;  // 定高开关
+float alt_target = 0.0f;        // 目标高度 (m)
+float hoverThrottle = 0.35f;    // 基础悬停油门
+
+PID altPid(1.0f, 0.0f, 0.0f);   // 外部位置环 (高度误差 -> 目标爬升速度)
+PID velZPid(0.1f, 0.01f, 0.0f); // 内部速度环 (速度误差 -> 增补油门)
+
 extern Quaternion attitude;
 extern Vector rates;
 extern float motors[4];
@@ -21,6 +31,7 @@ extern Quaternion attitude;
 extern Vector rates;
 extern float motors[4];
 extern float t; // 时间
+extern float dt; // 时间步长，给PID积分和微分用
 // 来自 rc.cpp
 extern float controlRoll, controlPitch, controlThrottle, controlYaw, controlMode;
 // 来自 motors.cpp (电机索引常量)
@@ -114,7 +125,37 @@ void interpretControls() {
 
 	if (abs(controlYaw) < 0.1) controlYaw = 0; // yaw dead zone
 
-	thrustTarget = controlThrottle;
+	// ====================== Altitude Hold Core ======================
+	if (alt_hold_enabled) {
+		// Panic switch: Exit altitude hold if throttle is pulled down or drone is disarmed
+		if (controlThrottle < 0.05f || !armed) {
+			alt_hold_enabled = false;
+		} 
+		else {
+			// Position outer loop: calculate target vertical velocity
+			float pos_err = alt_target - alt_est;                  
+			float target_speed = altPid.update(pos_err);       
+			target_speed = constrain(target_speed, -0.6f, 0.6f);   // Limit climb/descent rate
+
+			// Velocity inner loop: calculate throttle adjustment
+			float speed_err = target_speed - vz_est;               
+			float hover_adj = velZPid.update(speed_err);       
+
+			// Feedforward base + PID compensation
+			thrustTarget = hoverThrottle + hover_adj;
+			thrustTarget = constrain(thrustTarget, 0.1f, 0.8f);    // Keep motors spinning but prevent aggressive saturation
+		}
+	} 
+
+	// Revert to manual if disabled
+	if (!alt_hold_enabled) {
+		thrustTarget = controlThrottle;
+		
+		// Reset PIDs to prevent integral windup on re-engagement
+		altPid.reset();
+		velZPid.reset();
+	}
+	// ==============================================================
 
 	if (mode == STAB) {
 		float yawTarget = attitudeTarget.getYaw();
