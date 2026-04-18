@@ -125,8 +125,9 @@ void interpretControls() {
 
 	if (abs(controlYaw) < 0.1) controlYaw = 0; // yaw dead zone
 
+// 先把高度环注释掉了，后面有需要再加
 	// ====================== Altitude Hold Core ======================
-	if (alt_hold_enabled) {
+	if (false && alt_hold_enabled) {
 		// Panic switch: Exit altitude hold if throttle is pulled down or drone is disarmed
 		if (controlThrottle < 0.05f || !armed) {
 			alt_hold_enabled = false;

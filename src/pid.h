@@ -29,6 +29,9 @@ public:
 
 		if (dt > 0 && dt < dtMax) {
 			integral += error * dt;
+			if (i != 0.0f && windup > 0.0f) {
+				integral = constrain(integral, -windup / i, windup / i); // Limit total accumulated integral to prevent windup
+			}
 			derivative = lpf.update((error - prevError) / dt); // compute derivative and apply low-pass filter
 		} else {
 			integral = 0;
@@ -38,7 +41,7 @@ public:
 		prevError = error;
 		prevTime = t;
 
-		return p * error + constrain(i * integral, -windup, windup) + d * derivative; // PID
+		return p * error + (i * integral) + d * derivative; // PID
 	}
 
 	void reset() {
