@@ -1,6 +1,6 @@
 // Copyright (c) 2023 Oleg Kalachev <okalachev@gmail.com>
 // Repository: https://github.com/okalachev/flix
-// MAVLink通讯
+// MAVLink閫氳
 // MAVLink communication
 
 
@@ -14,10 +14,10 @@
 
 #define SYSTEM_ID 1
 #define MAVLINK_RATE_SLOW 1
-#define MAVLINK_RATE_FAST 10
+#define MAVLINK_RATE_FAST 5
 
-// 外部变量声明
-// 来自 main.cpp
+// 澶栭儴鍙橀噺澹版槑
+// 鏉ヨ嚜 main.cpp
 extern float t;
 extern float dt;
 extern Quaternion attitude;
@@ -28,47 +28,59 @@ extern float motors[4];
 extern bool landed;
 extern float logBuffer[1000][14];
 
-// 来自 rc.cpp
+// 鏉ヨ嚜 rc.cpp
 extern uint16_t channels[16];
 extern float controlRoll, controlPitch, controlThrottle, controlYaw, controlMode;
-extern float controlTime; // 上次收到控制信号的时间
-
-// 来自 control.cpp
+extern float controlTime; // 涓婃鏀跺埌鎺у埗淇″彿鐨勬椂闂?
+// 鏉ヨ嚜 control.cpp
 extern int mode;
 extern bool armed;
-// 飞行模式常量
+extern const char *lastStopReason;
+// 椋炶妯″紡甯搁噺
 extern const int STAB;
 extern const int AUTO;
-// 自动控制目标量 (用于 OFFBOARD/AUTO 模式)
+// 鑷姩鎺у埗鐩爣閲?(鐢ㄤ簬 OFFBOARD/AUTO 妯″紡)
 extern Vector ratesTarget;
 extern Quaternion attitudeTarget;
 extern float thrustTarget;
 extern Vector ratesExtra;
 extern Vector torqueTarget;
 
-// 外部函数声明
-// 来自 wifi.cpp
+// 澶栭儴鍑芥暟澹版槑
+// 鏉ヨ嚜 wifi.cpp
 void sendWiFi(const uint8_t *buf, int len);
 int receiveWiFi(uint8_t *buf, int len);
-// 来自 cli.cpp
+// 鏉ヨ嚜 cli.cpp
 void doCommand(String str, bool echo);
-// 来自 parameters.cpp
+// 鏉ヨ嚜 parameters.cpp
 int parametersCount();
 const char *getParameterName(int index);
+int getParameterIndex(const char *name);
 float getParameter(int index);
 float getParameter(const char *name);
 bool setParameter(const char *name, const float value);
 
-// 全局变量定义
+// 鍏ㄥ眬鍙橀噺瀹氫箟
 bool mavlinkConnected = false;
 String mavlinkPrintBuffer;
+int parameterSendIndex = -1;
+int parameterSendPasses = 0;
+uint32_t mavlinkTxMessages = 0;
+uint32_t mavlinkTxBytes = 0;
+uint32_t mavlinkRxMessages = 0;
+uint32_t mavlinkRxBytes = 0;
+uint32_t mavlinkParseErrors = 0;
+float mavlinkLastTxTime = NAN;
+float mavlinkLastRxTime = NAN;
 
-// 函数实现
+// 鍑芥暟瀹炵幇
 void sendMavlink();
 void receiveMavlink();
 void sendMessage(const void *msg);
 void handleMavlink(const void *_msg);
 void sendMavlinkPrint();
+void sendParameter(int index);
+void sendQueuedParameters();
 
 void processMavlink() {
 	sendMavlink();
@@ -77,11 +89,12 @@ void processMavlink() {
 
 void sendMavlink() {
 	sendMavlinkPrint();
+	sendQueuedParameters();
 
 	mavlink_message_t msg;
 	uint32_t time = t * 1000;
 
-	static Rate slow(MAVLINK_RATE_SLOW), fast(MAVLINK_RATE_FAST);
+	static WallRate slow(MAVLINK_RATE_SLOW), fast(MAVLINK_RATE_FAST);
 
 	if (slow) {
 		mavlink_msg_heartbeat_pack(SYSTEM_ID, MAV_COMP_ID_AUTOPILOT1, &msg, MAV_TYPE_QUADROTOR, MAV_AUTOPILOT_GENERIC,
@@ -125,19 +138,67 @@ void sendMessage(const void *msg) {
 	uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 	int len = mavlink_msg_to_send_buffer(buf, (mavlink_message_t *)msg);
 	sendWiFi(buf, len);
+	mavlinkTxMessages++;
+	mavlinkTxBytes += len;
+	mavlinkLastTxTime = t;
+}
+
+void sendParameter(int index) {
+	if (index < 0 || index >= parametersCount()) return;
+
+	char name[MAVLINK_MSG_PARAM_VALUE_FIELD_PARAM_ID_LEN + 1] = {};
+	strlcpy(name, getParameterName(index), sizeof(name));
+
+	mavlink_message_t msg;
+	mavlink_msg_param_value_pack(SYSTEM_ID, MAV_COMP_ID_AUTOPILOT1, &msg,
+		name, getParameter(index), MAV_PARAM_TYPE_REAL32, parametersCount(), index);
+	sendMessage(&msg);
+}
+
+void sendQueuedParameters() {
+	static WallRate rate(30);
+	if (!mavlinkConnected || parameterSendIndex < 0 || !rate) return;
+
+	for (int i = 0; i < 2 && parameterSendIndex >= 0; i++) {
+		sendParameter(parameterSendIndex);
+		parameterSendIndex++;
+
+		if (parameterSendIndex >= parametersCount()) {
+			parameterSendPasses--;
+			if (parameterSendPasses > 0) {
+				parameterSendIndex = 0;
+			} else {
+				parameterSendIndex = -1;
+			}
+		}
+	}
 }
 
 void receiveMavlink() {
 	uint8_t buf[MAVLINK_MAX_PACKET_LEN];
 	int len = receiveWiFi(buf, MAVLINK_MAX_PACKET_LEN);
-	if (len) mavlinkConnected = true;
+	if (len > 0) mavlinkRxBytes += len;
+	if (len && !mavlinkConnected) {
+		mavlinkConnected = true;
+		parameterSendIndex = 0;
+		parameterSendPasses = 2;
+	} else if (len) {
+		mavlinkConnected = true;
+	}
 
 	// New packet, parse it
 	mavlink_message_t msg;
-	mavlink_status_t status;
+	static mavlink_status_t status = {};
+	static uint8_t lastParseError = 0;
 	for (int i = 0; i < len; i++) {
 		if (mavlink_parse_char(MAVLINK_COMM_0, buf[i], &msg, &status)) {
+			mavlinkRxMessages++;
+			mavlinkLastRxTime = t;
 			handleMavlink(&msg);
+		}
+		if (status.parse_error != lastParseError) {
+			mavlinkParseErrors += (uint8_t)(status.parse_error - lastParseError);
+			lastParseError = status.parse_error;
 		}
 	}
 }
@@ -163,12 +224,8 @@ void handleMavlink(const void *_msg) {
 		mavlink_msg_param_request_list_decode(&msg, &m);
 		if (m.target_system && m.target_system != SYSTEM_ID) return;
 
-		mavlink_message_t msg;
-		for (int i = 0; i < parametersCount(); i++) {
-			mavlink_msg_param_value_pack(SYSTEM_ID, MAV_COMP_ID_AUTOPILOT1, &msg,
-				getParameterName(i), getParameter(i), MAV_PARAM_TYPE_REAL32, parametersCount(), i);
-			sendMessage(&msg);
-		}
+		parameterSendIndex = 0;
+		parameterSendPasses = 2;
 	}
 
 	if (msg.msgid == MAVLINK_MSG_ID_PARAM_REQUEST_READ) {
@@ -176,16 +233,13 @@ void handleMavlink(const void *_msg) {
 		mavlink_msg_param_request_read_decode(&msg, &m);
 		if (m.target_system && m.target_system != SYSTEM_ID) return;
 
-		char name[MAVLINK_MSG_PARAM_REQUEST_READ_FIELD_PARAM_ID_LEN + 1];
-		strlcpy(name, m.param_id, sizeof(name)); // param_id might be not null-terminated
-		float value = strlen(name) == 0 ? getParameter(m.param_index) : getParameter(name);
+		char name[MAVLINK_MSG_PARAM_REQUEST_READ_FIELD_PARAM_ID_LEN + 1] = {};
+		memcpy(name, m.param_id, MAVLINK_MSG_PARAM_REQUEST_READ_FIELD_PARAM_ID_LEN); // param_id might be not null-terminated
 		if (m.param_index != -1) {
-			memcpy(name, getParameterName(m.param_index), 16);
+			sendParameter(m.param_index);
+		} else {
+			sendParameter(getParameterIndex(name));
 		}
-		mavlink_message_t msg;
-		mavlink_msg_param_value_pack(SYSTEM_ID, MAV_COMP_ID_AUTOPILOT1, &msg,
-			name, value, MAV_PARAM_TYPE_REAL32, parametersCount(), m.param_index);
-		sendMessage(&msg);
 	}
 
 	if (msg.msgid == MAVLINK_MSG_ID_PARAM_SET) {
@@ -193,14 +247,11 @@ void handleMavlink(const void *_msg) {
 		mavlink_msg_param_set_decode(&msg, &m);
 		if (m.target_system && m.target_system != SYSTEM_ID) return;
 
-		char name[MAVLINK_MSG_PARAM_SET_FIELD_PARAM_ID_LEN + 1];
-		strlcpy(name, m.param_id, sizeof(name)); // param_id might be not null-terminated
-		setParameter(name, m.param_value);
-		// send ack
-		mavlink_message_t msg;
-		mavlink_msg_param_value_pack(SYSTEM_ID, MAV_COMP_ID_AUTOPILOT1, &msg,
-			m.param_id, m.param_value, MAV_PARAM_TYPE_REAL32, parametersCount(), 0); // index is unknown
-		sendMessage(&msg);
+		char name[MAVLINK_MSG_PARAM_SET_FIELD_PARAM_ID_LEN + 1] = {};
+		memcpy(name, m.param_id, MAVLINK_MSG_PARAM_SET_FIELD_PARAM_ID_LEN); // param_id might be not null-terminated
+		if (setParameter(name, m.param_value)) {
+			sendParameter(getParameterIndex(name));
+		}
 	}
 
 	if (msg.msgid == MAVLINK_MSG_ID_MISSION_REQUEST_LIST) { // handle to make qgc happy
@@ -291,40 +342,13 @@ void handleMavlink(const void *_msg) {
 		if (m.command == MAV_CMD_COMPONENT_ARM_DISARM) {
 			if (m.param1 && controlThrottle > 0.05) return; // don't arm if throttle is not low
 			accepted = true;
+			if (!m.param1 && armed) lastStopReason = "MAVLink disarm";
 			armed = m.param1 == 1;
 		}
 
 		if (m.command == MAV_CMD_DO_SET_MODE) {
-			if (m.param2 < 0 || m.param2 > AUTO) return; // incorrect mode
 			accepted = true;
-			mode = m.param2;
-		}
-
-		// 拦截：一键定高起飞指令 
-		if (m.command == MAV_CMD_NAV_TAKEOFF) {
-			extern bool alt_hold_enabled;
-			extern float alt_target;
-			extern float controlRoll, controlPitch, controlYaw;
-			
-			// param7 为 MAV_CMD_NAV_TAKEOFF 规定的高度参数 (m)
-			if (m.param7 > 0.05f) {
-				alt_target = m.param7; // 获取设定高度
-
-				// 切断当前所有的手柄摇杆与水平偏移，保证纯净直上直下
-				controlRoll = 0.0f;
-				controlPitch = 0.0f;
-				controlYaw = 0.0f;
-
-				alt_hold_enabled = true; // 强制交出油门控制权
-				accepted = true;
-			}
-		}
-
-		// 拦截：一键降落保命强退指令 (交给物理遥杆，这里提供指令退出的能力)
-		if (m.command == MAV_CMD_NAV_LAND) {
-			extern bool alt_hold_enabled;
-			alt_hold_enabled = false; 
-			accepted = true;
+			mode = STAB;
 		}
 
 		// send command ack

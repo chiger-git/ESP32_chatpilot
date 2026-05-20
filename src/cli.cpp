@@ -11,7 +11,6 @@
 #include "quaternion.h"
 
 // 这些函数定义在其他 .cpp 文件中，必须在这里声明才能调用
-void step();
 void processMavlink();
 void mavlinkPrint(const char* str);
 void printParameters();
@@ -22,11 +21,20 @@ void printIMUInfo();
 void printIMUCalibration();
 const char* getModeName();
 void printWiFiInfo();
+void printRCDiagnostics();
+void resetRCDiagnostics();
 void printLogHeader();
 void printLogData();
 void calibrateRC();
 void calibrateAccel();
+void autoTrimMotors();
 void testMotor(int motorId);
+void testRCMotorNoise(float motorValue, float duration);
+void testRCMotorNoiseOne(int motorId, float motorValue);
+bool setupFlow();
+void printFlowInfo();
+void testFlow(float duration);
+void setFlowPowerPin(bool enabled);
 void handleInput();
 
 extern const int MOTOR_REAR_LEFT, MOTOR_REAR_RIGHT, MOTOR_FRONT_RIGHT, MOTOR_FRONT_LEFT;
@@ -34,10 +42,34 @@ extern const int RAW, ACRO, STAB, AUTO;
 extern float t, dt, loopRate;
 extern uint16_t channels[16];
 extern float controlRoll, controlPitch, controlThrottle, controlYaw, controlMode;
+extern float controlTime;
 extern int mode;
 extern bool armed;
+extern const char *lastStopReason;
 extern Quaternion attitude;
 extern bool landed;
+extern float batteryVoltage;
+extern float batteryVoltageMin;
+extern float thrustTarget;
+extern float idleThrust;
+extern float idleStickThreshold;
+extern float motorMinOutput;
+float getMotorSpinMin();
+float getTorqueScale();
+extern float lastRcLossAge;
+extern float lastRcLossRealAge;
+extern float lastRcLossMaxGapMs;
+extern float lastRcLossBattery;
+extern float lastRcLossMotorMax;
+extern uint32_t lastRcLossFrames;
+extern uint32_t lastRcLossLostFrames;
+extern uint32_t lastRcLossFailsafeFrames;
+extern uint16_t lastRcLossUartAvailable;
+extern uint16_t lastRcLossUartMaxAvailable;
+extern float flightLoopLastIntervalMs;
+extern float flightLoopMaxIntervalMs;
+extern uint32_t flightLoopOverrunCount;
+float getBatteryCompensationScale(bool allowBoost = true);
 
 const char* motd =
 "\nWelcome to\n"
@@ -87,9 +119,9 @@ void print(const char* format, ...) {
 }
 
 void pause(float duration) {
-	float start = t;
-	while (t - start < duration) {
-		step();
+	uint32_t start = millis();
+	uint32_t durationMs = (uint32_t)(duration * 1000.0f);
+	while ((uint32_t)(millis() - start) < durationMs) {
 		handleInput();
 #if WIFI_ENABLED
 		processMavlink();
@@ -131,6 +163,8 @@ void doCommand(String str, bool echo = false) {
 		print("Time: %f\n", t);
 		print("Loop rate: %.0f\n", loopRate);
 		print("dt: %f\n", dt);
+		print("Flight loop real interval: last=%.2f ms max=%.2f ms overruns=%lu\n",
+			flightLoopLastIntervalMs, flightLoopMaxIntervalMs, flightLoopOverrunCount);
 	} else if (command == "ps") {
 		Vector a = attitude.toEuler();
 		print("roll: %f pitch: %f yaw: %f\n", degrees(a.x), degrees(a.y), degrees(a.z));
@@ -140,6 +174,15 @@ void doCommand(String str, bool echo = false) {
 		printIMUInfo();
 		printIMUCalibration();
 		print("landed: %d\n", landed);
+	} else if (command == "flowinit") {
+		setupFlow();
+	} else if (command == "flow") {
+		if (arg0 == "init") setupFlow();
+		else printFlowInfo();
+	} else if (command == "flowtest") {
+		testFlow(arg0.length() ? arg0.toFloat() : 10.0f);
+	} else if (command == "flowpwr") {
+		setFlowPowerPin(arg0.toInt() != 0);
 	} else if (command == "arm") {
 		armed = true;
 	} else if (command == "disarm") {
@@ -159,8 +202,23 @@ void doCommand(String str, bool echo = false) {
 		}
 		print("\nroll: %g pitch: %g yaw: %g throttle: %g mode: %g\n",
 			controlRoll, controlPitch, controlYaw, controlThrottle, controlMode);
+		print("RC age: %.3f s\n", t - controlTime);
 		print("mode: %s\n", getModeName());
-		print("armed: %d\n", armed);
+		print("armed: %d last stop: %s\n", armed, lastStopReason);
+		printRCDiagnostics();
+		if (isfinite(lastRcLossAge)) {
+			print("Last RC loss snapshot: age=%.3f s real_age=%.3f s max_gap=%.1f ms frames=%lu lost=%lu failsafe=%lu uart=%u/%u bat=%.3f V motor_max=%.2f\n",
+				lastRcLossAge, lastRcLossRealAge, lastRcLossMaxGapMs, lastRcLossFrames,
+				lastRcLossLostFrames, lastRcLossFailsafeFrames, lastRcLossUartAvailable,
+				lastRcLossUartMaxAvailable, lastRcLossBattery, lastRcLossMotorMax);
+		}
+	} else if (command == "rcrst") {
+		resetRCDiagnostics();
+		print("RC diagnostics reset\n");
+	} else if (command == "rctest") {
+		testRCMotorNoise(arg0.toFloat(), arg1.length() ? arg1.toFloat() : 5.0f);
+	} else if (command == "rctestm") {
+		testRCMotorNoiseOne(arg0.toInt(), arg1.toFloat());
 	} else if (command == "wifi") {
 #if WIFI_ENABLED
 		printWiFiInfo();
@@ -168,6 +226,12 @@ void doCommand(String str, bool echo = false) {
 	} else if (command == "mot") {
 		print("front-right %g front-left %g rear-right %g rear-left %g\n",
 			motors[MOTOR_FRONT_RIGHT], motors[MOTOR_FRONT_LEFT], motors[MOTOR_REAR_RIGHT], motors[MOTOR_REAR_LEFT]);
+		print("thrust=%.3f idle_thr=%.3f mot_min=%.3f spin_min=%.3f tq_scale=%.3f idle_stk=%.3f\n",
+			thrustTarget, idleThrust, motorMinOutput, getMotorSpinMin(), getTorqueScale(), idleStickThreshold);
+	} else if (command == "bat") {
+		if (arg0 == "reset") batteryVoltageMin = batteryVoltage;
+		print("battery: %.3f V, min: %.3f V, comp scale: %.3f, idle scale: %.3f\n",
+			batteryVoltage, batteryVoltageMin, getBatteryCompensationScale(true), getBatteryCompensationScale(false));
 	} else if (command == "log") {
 		printLogHeader();
 		if (arg0 == "dump") printLogData();
@@ -175,6 +239,8 @@ void doCommand(String str, bool echo = false) {
 		calibrateRC();
 	} else if (command == "ca") {
 		calibrateAccel();
+	} else if (command == "atrim" || command == "autotrim") {
+		autoTrimMotors();
 	} else if (command == "mfr") {
 		testMotor(MOTOR_FRONT_RIGHT);
 	} else if (command == "mfl") {

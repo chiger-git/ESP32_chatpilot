@@ -1,0 +1,450 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>ChatPilot Offline Demo</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #1f2328;
+      --muted: #66707d;
+      --line: #d7dce2;
+      --surface: #ffffff;
+      --canvas: #f4f7fa;
+      --green: #0c8f68;
+      --blue: #1c6dd0;
+      --amber: #b86e00;
+      --dark: #20242a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--canvas);
+      color: var(--ink);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    main {
+      width: min(100%, 760px);
+      margin: 0 auto;
+      padding: 26px 16px 34px;
+    }
+    .header, .status, .panel, .metric {
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .mark {
+      display: grid;
+      place-items: center;
+      width: 46px;
+      height: 46px;
+      border-radius: 8px;
+      background: var(--green);
+      color: white;
+      font-weight: 900;
+      font-size: 23px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 28px;
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+    .sub {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .badge {
+      margin-left: auto;
+      border: 1px solid #a7dcc5;
+      border-radius: 8px;
+      color: var(--green);
+      background: #e7f6ef;
+      font-size: 11px;
+      font-weight: 900;
+      padding: 7px 10px;
+    }
+    .status {
+      padding: 12px;
+      margin-bottom: 12px;
+      color: #30343b;
+      font-size: 14px;
+      line-height: 1.65;
+    }
+    .panel {
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .title {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      margin-bottom: 10px;
+      font-size: 17px;
+      font-weight: 900;
+    }
+    textarea {
+      width: 100%;
+      min-height: 108px;
+      resize: vertical;
+      border: 1px solid #cad2dd;
+      border-radius: 8px;
+      background: #f8fafc;
+      color: var(--ink);
+      padding: 12px;
+      font: inherit;
+      font-size: 16px;
+      line-height: 1.45;
+      outline-color: var(--green);
+    }
+    .examples {
+      display: grid;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    .example {
+      border: 1px solid #d9e0e8;
+      border-radius: 8px;
+      background: #f0f4f7;
+      color: #30343b;
+      padding: 10px;
+      text-align: left;
+      font: inherit;
+      line-height: 1.45;
+    }
+    .actions {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    button.primary, button.secondary {
+      min-height: 48px;
+      border-radius: 8px;
+      font: inherit;
+      font-weight: 900;
+    }
+    button.primary {
+      border: 0;
+      background: var(--green);
+      color: white;
+    }
+    button.secondary {
+      border: 1px solid #b8ddca;
+      background: #eaf4ef;
+      color: var(--green);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .metric {
+      min-height: 76px;
+      padding: 10px;
+    }
+    .metric b {
+      display: block;
+      font-size: 22px;
+      line-height: 1.15;
+    }
+    .metric span {
+      display: block;
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .intent {
+      color: #30343b;
+      line-height: 1.55;
+      margin-bottom: 10px;
+    }
+    .step {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .num {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border: 1px solid #afcfff;
+      border-radius: 8px;
+      background: #e8f1ff;
+      color: var(--blue);
+      font-size: 12px;
+      font-weight: 900;
+    }
+    .card {
+      border: 1px solid #dee5ed;
+      border-radius: 8px;
+      background: #f9fbfd;
+      padding: 10px;
+    }
+    .cmdHead {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .cmdHead b {
+      flex: 1;
+      font-size: 15px;
+    }
+    .cmdHead code {
+      color: var(--blue);
+      font-size: 11px;
+      font-weight: 900;
+      white-space: nowrap;
+    }
+    .detail {
+      margin-top: 5px;
+      color: #30343b;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .hint {
+      margin-top: 7px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+    pre {
+      overflow: auto;
+      max-height: 280px;
+      margin: 0;
+      border-radius: 8px;
+      background: var(--dark);
+      color: #ecf3f1;
+      padding: 12px;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .log {
+      border: 1px solid #e1e6ec;
+      border-radius: 8px;
+      background: #f6f8fa;
+      padding: 8px 9px;
+      margin-bottom: 7px;
+      color: #30343b;
+      font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="header">
+      <div class="mark">CP</div>
+      <div>
+        <h1>ChatPilot</h1>
+        <div class="sub">自然语言飞控任务编排</div>
+      </div>
+      <div class="badge">OFFLINE</div>
+    </section>
+
+    <section class="status">
+      飞控链路：演示隔离<br />
+      真实飞控未接入，所有指令只生成任务 JSON 和仿真日志。
+    </section>
+
+    <section class="panel">
+      <div class="title">自然语言任务</div>
+      <textarea id="prompt">我在无人机上放了一个药盒子，你帮我送到前面再返回</textarea>
+      <div class="examples">
+        <button class="example">我在无人机上放了一个药盒子，你帮我送到前面再返回</button>
+        <button class="example">起飞到一米二，向前飞 10 米，拍照，然后返航降落</button>
+        <button class="example">把急救包送到左前方 6 米，放下后回来</button>
+      </div>
+      <div class="actions">
+        <button class="primary" id="planBtn">生成任务</button>
+        <button class="secondary" id="simBtn">仿真执行</button>
+      </div>
+    </section>
+
+    <section class="metrics">
+      <div class="metric"><b id="cmdCount">0</b><span>指令</span></div>
+      <div class="metric"><b id="duration">0s</b><span>估计时长</span></div>
+      <div class="metric"><b id="confidence">0%</b><span>置信度</span></div>
+    </section>
+
+    <section class="panel">
+      <div class="title">任务编排 <span class="badge">LOCAL</span></div>
+      <div class="intent" id="intent"></div>
+      <div id="timeline"></div>
+    </section>
+
+    <section class="panel">
+      <div class="title">飞控 JSON <button class="secondary" id="copyBtn">复制</button></div>
+      <pre id="json"></pre>
+    </section>
+
+    <section class="panel">
+      <div class="title">执行日志</div>
+      <div id="logs"></div>
+    </section>
+  </main>
+
+  <script>
+    const promptEl = document.querySelector('#prompt');
+    const timelineEl = document.querySelector('#timeline');
+    const jsonEl = document.querySelector('#json');
+    const logsEl = document.querySelector('#logs');
+    let currentPlan;
+
+    const examples = Array.from(document.querySelectorAll('.example'));
+    examples.forEach((button) => {
+      button.addEventListener('click', () => {
+        promptEl.value = button.textContent.trim();
+        render(buildPlan(promptEl.value));
+      });
+    });
+
+    function id() {
+      return 'CP-' + new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14);
+    }
+    function clamp(n, min, max) {
+      return Math.min(Math.max(n, min), max);
+    }
+    function distance(text) {
+      const match = text.match(/(\d+(?:\.\d+)?)\s*(米|m|M)/);
+      return match ? clamp(Number(match[1]), 1, 30) : 8;
+    }
+    function altitude(text) {
+      const match = text.match(/(?:高度|高|起飞到|飞到)\s*(\d+(?:\.\d+)?)\s*(米|m|M)/);
+      if (match) return clamp(Number(match[1]), 0.5, 5);
+      if (text.includes('一米二') || text.includes('1米2') || text.includes('1.2米')) return 1.2;
+      return 1.2;
+    }
+    function direction(text, d) {
+      const diag = Math.round((d / Math.SQRT2) * 10) / 10;
+      if (text.includes('左前')) return { label: '左前方', x: diag, y: -diag };
+      if (text.includes('右前')) return { label: '右前方', x: diag, y: diag };
+      if (text.includes('左')) return { label: '左侧', x: 0, y: -d };
+      if (text.includes('右')) return { label: '右侧', x: 0, y: d };
+      if (text.includes('后')) return { label: '后方', x: -d, y: 0 };
+      return { label: '前方', x: d, y: 0 };
+    }
+    function payload(text) {
+      if (text.includes('药')) return '药盒';
+      if (text.includes('急救')) return '急救包';
+      if (text.includes('外卖')) return '外卖';
+      if (text.includes('包裹')) return '包裹';
+      if (text.includes('物资')) return '物资';
+      return '载荷';
+    }
+    function cmd(command, title, detail, params, durationSec, mavlinkHint) {
+      return { command, title, detail, params, durationSec, mavlinkHint };
+    }
+    function buildPlan(text) {
+      const source = text.trim() || '我在无人机上放了一个药盒子，你帮我送到前面再返回';
+      const d = distance(source);
+      const alt = altitude(source);
+      const dir = direction(source, d);
+      const item = payload(source);
+      const wantsReturn = /返|回|回来|返航/.test(source);
+      const wantsPhoto = /拍|照|巡检|查看|侦察/.test(source);
+      const wantsDelivery = /送|放|投|递|交付|药|包裹|物资|急救/.test(source);
+      const travel = Math.ceil(d / 0.6);
+      const commands = [
+        cmd('ARM', '解锁电机', '进入任务待执行状态', { require_operator_confirm: true }, 1, 'MAV_CMD_COMPONENT_ARM_DISARM'),
+        cmd('TAKEOFF', '起飞定高', `爬升到 ${alt.toFixed(1)} m，保持低速演示高度`, { altitude_m: alt, climb_rate_mps: 0.4 }, 4, 'MAV_CMD_NAV_TAKEOFF'),
+        cmd('MOVE_BODY', `飞向${dir.label}`, `机体系位移 x=${dir.x} m, y=${dir.y} m`, { x_m: dir.x, y_m: dir.y, z_m: 0, speed_mps: 0.6 }, travel, 'SET_POSITION_TARGET_LOCAL_NED'),
+      ];
+      if (wantsPhoto) {
+        commands.push(
+          cmd('HOVER', '悬停稳定', '等待姿态收敛后执行拍照动作', { hold_sec: 2 }, 2, 'MAV_CMD_NAV_LOITER_TIME'),
+          cmd('TAKE_PHOTO', '拍照记录', '记录目标点证明材料', { camera: 'demo_virtual_camera' }, 1, 'MAV_CMD_IMAGE_START_CAPTURE'),
+        );
+      }
+      if (wantsDelivery) {
+        commands.push(
+          cmd('LAND', '目标点降落', '软降落到投递点', { landing_profile: 'gentle' }, 5, 'MAV_CMD_NAV_LAND'),
+          cmd('PAYLOAD_RELEASE', `释放${item}`, '演示用舵机通道开合，不连接真实飞控', { payload: item, servo_channel: 7, pwm_us: 1800, demo_only: true }, 2, 'MAV_CMD_DO_SET_SERVO'),
+        );
+      } else {
+        commands.push(cmd('HOVER', '到点悬停', '目标点保持位置', { hold_sec: 3 }, 3, 'MAV_CMD_NAV_LOITER_TIME'));
+      }
+      if (wantsReturn) {
+        commands.push(
+          cmd('TAKEOFF', '再次起飞', `从目标点爬升到 ${alt.toFixed(1)} m`, { altitude_m: alt, climb_rate_mps: 0.4 }, 4, 'MAV_CMD_NAV_TAKEOFF'),
+          cmd('RETURN_HOME', '返航', '按起点相反位移返回 Home', { x_m: -dir.x, y_m: -dir.y, z_m: 0, speed_mps: 0.6 }, travel, 'SET_POSITION_TARGET_LOCAL_NED / MAV_CMD_NAV_RETURN_TO_LAUNCH'),
+          cmd('LAND', '回到起点降落', '在 Home 点降落并结束任务', { landing_profile: 'home' }, 5, 'MAV_CMD_NAV_LAND'),
+        );
+      }
+      commands.push(cmd('DISARM', '锁定电机', '任务结束，输出摘要日志', { reason: 'mission_complete' }, 1, 'MAV_CMD_COMPONENT_ARM_DISARM'));
+      const seq = commands.map((c, index) => ({ seq: index + 1, ...c }));
+      return {
+        mission_id: id(),
+        mode: 'DEMO_ONLY',
+        source_text: source,
+        intent_summary: wantsDelivery ? `携带${item}，飞向${dir.label}${d}米，完成投递${wantsReturn ? '并返回起点' : ''}` : `飞向${dir.label}${d}米${wantsPhoto ? '并拍照' : ''}${wantsReturn ? '后返航' : ''}`,
+        safety: { geofenceRadiusM: 30, maxAltitudeM: 5, requiresPilotConfirm: true },
+        commands: seq,
+      };
+    }
+    function render(plan) {
+      currentPlan = plan;
+      const total = plan.commands.reduce((sum, c) => sum + c.durationSec, 0);
+      document.querySelector('#cmdCount').textContent = plan.commands.length;
+      document.querySelector('#duration').textContent = total + 's';
+      document.querySelector('#confidence').textContent = '88%';
+      document.querySelector('#intent').textContent = plan.intent_summary;
+      timelineEl.innerHTML = plan.commands.map((c) => `
+        <div class="step">
+          <div class="num">${c.seq}</div>
+          <div class="card">
+            <div class="cmdHead"><b>${c.title}</b><code>${c.command}</code></div>
+            <div class="detail">${c.detail}</div>
+            <div class="hint">${c.mavlinkHint}</div>
+          </div>
+        </div>
+      `).join('');
+      jsonEl.textContent = JSON.stringify({
+        mission_id: plan.mission_id,
+        mode: plan.mode,
+        source_text: plan.source_text,
+        intent_summary: plan.intent_summary,
+        safety: plan.safety,
+        commands: plan.commands.map((c) => ({
+          seq: c.seq,
+          command: c.command,
+          params: c.params,
+          mavlink_hint: c.mavlinkHint,
+          duration_sec: c.durationSec,
+        })),
+      }, null, 2);
+      logsEl.innerHTML = '<div class="log">SYSTEM boot: ChatPilot offline console ready</div><div class="log">LINK guard: no hardware command will be transmitted</div>';
+    }
+    async function simulate() {
+      logsEl.innerHTML = `<div class="log">MISSION ${currentPlan.mission_id}: armed in demo sandbox</div>`;
+      for (const c of currentPlan.commands) {
+        await new Promise((resolve) => setTimeout(resolve, 320));
+        logsEl.insertAdjacentHTML('afterbegin', `<div class="log">[${String(c.seq).padStart(2, '0')}] ${c.command} ${JSON.stringify(c.params)}</div>`);
+      }
+      logsEl.insertAdjacentHTML('afterbegin', '<div class="log">MISSION complete: no packets sent to real FC</div>');
+    }
+    document.querySelector('#planBtn').addEventListener('click', () => render(buildPlan(promptEl.value)));
+    document.querySelector('#simBtn').addEventListener('click', simulate);
+    document.querySelector('#copyBtn').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(jsonEl.textContent);
+        alert('任务 JSON 已复制');
+      } catch {
+        alert('复制失败，可以长按 JSON 手动复制');
+      }
+    });
+    render(buildPlan(promptEl.value));
+  </script>
+</body>
+</html>

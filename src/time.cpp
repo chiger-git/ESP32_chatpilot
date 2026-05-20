@@ -24,6 +24,12 @@ void step() {
 	computeLoopRate();
 }
 
+void stepFixed(float fixedDt) {
+	dt = fixedDt > 0 ? fixedDt : 0;
+	t += dt;
+	computeLoopRate();
+}
+
 void computeLoopRate() {
 	static float windowStart = 0;
 	static uint32_t rate = 0;

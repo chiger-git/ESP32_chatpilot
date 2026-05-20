@@ -1,21 +1,15 @@
-// Copyright (c) 2023 Oleg Kalachev <okalachev@gmail.com>
+﻿// Copyright (c) 2023 Oleg Kalachev <okalachev@gmail.com>
 // Repository: https://github.com/okalachev/flix
-// Main firmware file 主程序文件20251226
-// 源代码使用Arduino IDE 2.3.x以上版本编译，不支持老版本的1.8.19！
-// 必须安装ESP32开发板核心库（即esp32 by Espressif Systems）
-// 必须安装MAVLINK，FlixPeriph库文件！
-// 开发板可选择ESP32 Dev Module或WeMOS D1 MINI ESP32；
-// 嘉立创开源项目：ESP32迷你无人机 https://oshwhub.com/malagis/esp32-mini-plane
-// B站微辣火龙果 https://space.bilibili.com/544479100
+// Main firmware entry point.
 
 #include <Arduino.h>
+#include <esp_system.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include "vector.h"
-#include "quaternion.h"
+#include "quaternion.h" 
 #include "util.h"
-#include "voice/voice.h"
-#include "rcwl_1605/rcwl_1605.h"
 
-// 外部函数声明
 void setupParameters();
 void syncParameters();
 void setupLED();
@@ -29,28 +23,41 @@ void setupRC();
 void readRC();
 void estimate();
 void control();
-void handleInput();      // cli.cpp
-void processMavlink();   // mavlink.cpp
-void logData();          // log.cpp
-void step();             // time.cpp (计算 dt 的函数)
+void handleInput();
+void processMavlink();
+void logData();
+void stepFixed(float fixedDt);
 
-extern void print(const char* format, ...); 
+extern void print(const char* format, ...);
 
-// 全局变量定义
+constexpr uint32_t FLIGHT_LOOP_HZ = 250;
+constexpr float FLIGHT_LOOP_DT = 1.0f / FLIGHT_LOOP_HZ;
+constexpr uint32_t SERVICE_LOOP_MS = 5;
+
+void flightTask(void *parameter);
+void runFlightStep();
+void runServiceStep();
+void setFlightControlPaused(bool paused);
+
 float t = 0;
 float dt = 0;
-float controlRoll, controlPitch, controlYaw, controlThrottle; 
+float controlRoll, controlPitch, controlYaw, controlThrottle;
 float controlMode = NAN;
-Vector gyro; 
-Vector acc; 
-Vector rates; 
-Quaternion attitude; 
-bool landed; 
+Vector gyro;
+Vector acc;
+Vector rates;
+Quaternion attitude;
+bool landed;
 float motors[4];
+volatile bool flightControlPaused = false;
+float flightLoopLastIntervalMs = 0.0f;
+float flightLoopMaxIntervalMs = 0.0f;
+uint32_t flightLoopOverrunCount = 0;
 
 void setup() {
 	Serial.begin(115200);
-	print("程序初始化！\n");
+	print("Program init\n");
+	print("Reset reason: %d\n", esp_reset_reason());
 	disableBrownOut();
 	setupParameters();
 	setupLED();
@@ -61,25 +68,65 @@ void setup() {
 #endif
 	setupIMU();
 	setupRC();
-	voice_init();
-	setupRCWL1605();
 	setLED(false);
-	print("初始化完成！\n");
+
+	xTaskCreatePinnedToCore(
+		flightTask,
+		"flight",
+		4096,
+		NULL,
+		4,
+		NULL,
+		1);
+
+	print("Init done\n");
 }
 
 void loop() {
+	runServiceStep();
+	vTaskDelay(pdMS_TO_TICKS(SERVICE_LOOP_MS));
+}
+
+void flightTask(void *parameter) {
+	(void)parameter;
+	TickType_t lastWake = xTaskGetTickCount();
+	const TickType_t period = pdMS_TO_TICKS(1000 / FLIGHT_LOOP_HZ);
+
+	for (;;) {
+		vTaskDelayUntil(&lastWake, period);
+		runFlightStep();
+	}
+}
+
+void runFlightStep() {
+	static uint32_t lastRunMicros = 0;
+	const uint32_t now = micros();
+	if (lastRunMicros != 0) {
+		flightLoopLastIntervalMs = (now - lastRunMicros) * 0.001f;
+		if (flightLoopLastIntervalMs > flightLoopMaxIntervalMs) flightLoopMaxIntervalMs = flightLoopLastIntervalMs;
+		if (flightLoopLastIntervalMs > 6.0f) flightLoopOverrunCount++;
+	}
+	lastRunMicros = now;
+
+	if (flightControlPaused) return;
 	readIMU();
-	readRCWL1605();
-	step();
+	if (flightControlPaused) return;
+	stepFixed(FLIGHT_LOOP_DT);
 	readRC();
 	estimate();
 	control();
 	sendMotors();
+	logData();
+}
+
+void runServiceStep() {
 	handleInput();
-	voice_read_command();
 #if WIFI_ENABLED
 	processMavlink();
 #endif
-	logData();
 	syncParameters();
+}
+
+void setFlightControlPaused(bool paused) {
+	flightControlPaused = paused;
 }

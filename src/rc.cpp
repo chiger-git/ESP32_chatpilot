@@ -11,22 +11,54 @@
 extern float t; // main.cpp
 extern void print(const char* format, ...); // cli.cpp
 extern void pause(float duration); // cli.cpp
+extern bool armed;
+void setFlightControlPaused(bool paused);
+void stopMotors();
+void sendMotors();
+void stepFixed(float fixedDt);
+float getMappedMotorOutput(int motorId, float value);
+extern const int MOTOR_REAR_LEFT;
+extern const int MOTOR_REAR_RIGHT;
+extern const int MOTOR_FRONT_RIGHT;
+extern const int MOTOR_FRONT_LEFT;
+#if WIFI_ENABLED
+void processMavlink();
+#endif
 
 // 输出到全局的控制量
 extern float controlRoll, controlPitch, controlThrottle, controlYaw, controlMode;
+extern float motors[4];
 
 // 内部函数前向声明
 void normalizeRC();
+float normalizeRCChannel(int channel);
 void printRCCalibration();
 void calibrateRCChannel(float *channel, uint16_t in[16], uint16_t out[16], const char *str);
+float getRCRealAge();
+void resetRCDiagnostics();
+void printRCDiagnostics();
+void testRCMotorNoise(float motorValue, float duration);
+void testRCMotorNoiseOne(int motorId, float motorValue);
+void serviceDuringMotorNoiseTest();
 
 // 全局变量定义
 // 定义 SBUS 对象
-// ESP32 默认 Serial2 引脚: RX=16, TX=17
-// 如果你的接收机接在其他脚，请用: SBUS rc(Serial2, rx_pin, tx_pin);
-SBUS rc(Serial2); 
+// Bolder Flight SBUS 构造函数：SBUS(Bus, RX, TX, Invert)
+SBUS rc(Serial2, 16, 17, true); 
 uint16_t channels[16]; // raw rc channels
+
 float controlTime = 0; // time of the last controls update
+uint32_t rcFrameCount = 0;
+uint32_t rcLostFrameCount = 0;
+uint32_t rcFailsafeFrameCount = 0;
+uint32_t rcNoFramePollCount = 0;
+uint32_t rcLastFrameMicros = 0;
+uint32_t rcMaxFrameGapMicros = 0;
+uint32_t rcLastFrameGapMicros = 0;
+uint16_t rcLastUartAvailable = 0;
+uint16_t rcMaxUartAvailable = 0;
+bool rcLastLostFrame = false;
+bool rcLastFailsafe = false;
 // 校准数据
 float channelZero[16]; // calibration zero values
 float channelMax[16]; // calibration max values
@@ -36,24 +68,68 @@ float rollChannel = NAN, pitchChannel = NAN, throttleChannel = NAN, yawChannel =
 
 void setupRC() {
 	print("Setup RC\n");
-	rc.begin();
+	rc.begin(); 
 }
 
 bool readRC() {
+	const uint16_t pending = Serial2.available();
+	rcLastUartAvailable = pending;
+	if (pending > rcMaxUartAvailable) rcMaxUartAvailable = pending;
+
 	if (rc.read()) {
 		SBUSData data = rc.data();
+		const uint32_t now = micros();
+		if (rcLastFrameMicros != 0) {
+			rcLastFrameGapMicros = now - rcLastFrameMicros;
+			if (rcLastFrameGapMicros > rcMaxFrameGapMicros) rcMaxFrameGapMicros = rcLastFrameGapMicros;
+		}
+		rcLastFrameMicros = now;
+		rcFrameCount++;
+		rcLastLostFrame = data.lost_frame;
+		rcLastFailsafe = data.failsafe;
+		if (data.lost_frame) rcLostFrameCount++;
+		if (data.failsafe) rcFailsafeFrameCount++;
 		for (int i = 0; i < 16; i++) channels[i] = data.ch[i]; // copy channels data
 		normalizeRC();
 		controlTime = t;
 		return true;
 	}
+	rcNoFramePollCount++;
 	return false;
 }
+// bool readRC() {
+//     // --- 调试区块1：打印串口缓冲区是否有原始字面量 ---
+//     static uint32_t lastRxCheck = 0;
+//     if (millis() - lastRxCheck > 1000) { // 每1秒打印一次
+//         print("Serial2 RX buffer target: %d\n", Serial2.available());
+//         lastRxCheck = millis();
+//     }
+//     // ----------------------------------------------
+
+//     if (rc.read()) {
+//         SBUSData data = rc.data();
+//         for (int i = 0; i < 16; i++) channels[i] = data.ch[i]; // copy channels data
+//         normalizeRC();
+//         controlTime = t;
+
+//         // --- 调试区块2：打印成功解析到的通道数值 ---
+//         static uint32_t lastChCheck = 0;
+//         if (millis() - lastChCheck > 500) { // 每0.5秒打印一次
+//             print("SBUS Decoded -> CH1:%d CH2:%d CH3:%d CH4:%d\n", 
+//                 channels[0], channels[1], channels[2], channels[3]);
+//             lastChCheck = millis();
+//         }
+//         // -----------------------------------------
+
+//         return true;
+//     }
+//     return false;
+// }
 
 void normalizeRC() {
 	float controls[16];
 	for (int i = 0; i < 16; i++) {
-		controls[i] = mapf(channels[i], channelZero[i], channelMax[i], 0, 1);
+		controls[i] = normalizeRCChannel(i);
 	}
 	// Update control values
 	controlRoll = rollChannel >= 0 ? controls[(int)rollChannel] : NAN;
@@ -63,7 +139,17 @@ void normalizeRC() {
 	controlMode = modeChannel >= 0 ? controls[(int)modeChannel] : NAN;
 }
 
+float normalizeRCChannel(int channel) {
+	if (channel < 0 || channel >= 16) return NAN;
+	if (channelZero[channel] == channelMax[channel]) return NAN;
+	return mapf(channels[channel], channelZero[channel], channelMax[channel], 0, 1);
+}
+
 void calibrateRC() {
+	armed = false;
+	setFlightControlPaused(true);
+	delay(20);
+	stopMotors();
 	uint16_t zero[16];
 	uint16_t center[16];
 	uint16_t max[16];
@@ -77,6 +163,9 @@ void calibrateRC() {
 	calibrateRCChannel(&rollChannel, zero, max, "7/8 横滚通道识别,左摇杆:向下推到底,右摇杆:向右推到底(横滚右转)[3秒]\n...     ...\n...     ..o\n.o.     ...\n");
 	calibrateRCChannel(&modeChannel, zero, max, "8/8 模式通道识别,先将解锁开关拨回锁定位置,然后将模式开关拨到最高档位(如手动模式)[3秒]\n");
 	printRCCalibration();
+	stopMotors();
+	armed = false;
+	setFlightControlPaused(false);
 }
 
 //第1步：初始化位置,操作：
@@ -149,4 +238,102 @@ void printRCCalibration() {
 	print("Yaw       %-7g%-7g%-7g\n", yawChannel, yawChannel >= 0 ? channelZero[(int)yawChannel] : NAN, yawChannel >= 0 ? channelMax[(int)yawChannel] : NAN);
 	print("Throttle  %-7g%-7g%-7g\n", throttleChannel, throttleChannel >= 0 ? channelZero[(int)throttleChannel] : NAN, throttleChannel >= 0 ? channelMax[(int)throttleChannel] : NAN);
 	print("Mode      %-7g%-7g%-7g\n", modeChannel, modeChannel >= 0 ? channelZero[(int)modeChannel] : NAN, modeChannel >= 0 ? channelMax[(int)modeChannel] : NAN);
+}
+
+float getRCRealAge() {
+	if (rcLastFrameMicros == 0) return NAN;
+	return (micros() - rcLastFrameMicros) * 0.000001f;
+}
+
+void resetRCDiagnostics() {
+	rcFrameCount = 0;
+	rcLostFrameCount = 0;
+	rcFailsafeFrameCount = 0;
+	rcNoFramePollCount = 0;
+	rcLastFrameMicros = 0;
+	rcMaxFrameGapMicros = 0;
+	rcLastFrameGapMicros = 0;
+	rcLastUartAvailable = 0;
+	rcMaxUartAvailable = 0;
+	rcLastLostFrame = false;
+	rcLastFailsafe = false;
+}
+
+void printRCDiagnostics() {
+	print("RC frames: %lu no-frame polls: %lu\n", rcFrameCount, rcNoFramePollCount);
+	print("SBUS flags: lost=%lu failsafe=%lu last_lost=%d last_failsafe=%d\n",
+		rcLostFrameCount, rcFailsafeFrameCount, rcLastLostFrame, rcLastFailsafe);
+	print("RC real age: %.3f s, last gap: %.1f ms, max gap: %.1f ms\n",
+		getRCRealAge(), rcLastFrameGapMicros * 0.001f, rcMaxFrameGapMicros * 0.001f);
+	print("Serial2 pending bytes: last=%u max=%u\n", rcLastUartAvailable, rcMaxUartAvailable);
+}
+
+void testRCMotorNoise(float motorValue, float duration) {
+	motorValue = constrain(motorValue, 0.0f, 1.0f);
+	duration = constrain(duration, 1.0f, 10.0f);
+	print("RC motor-noise test: motors=%.2f mapped RL/RR/FR/FL=%.2f %.2f %.2f %.2f duration=%.1f s. REMOVE PROPS.\n",
+		motorValue,
+		getMappedMotorOutput(MOTOR_REAR_LEFT, motorValue),
+		getMappedMotorOutput(MOTOR_REAR_RIGHT, motorValue),
+		getMappedMotorOutput(MOTOR_FRONT_RIGHT, motorValue),
+		getMappedMotorOutput(MOTOR_FRONT_LEFT, motorValue),
+		duration);
+
+	armed = false;
+	setFlightControlPaused(true);
+	delay(20);
+	stopMotors();
+	resetRCDiagnostics();
+
+	for (int i = 0; i < 4; i++) motors[i] = motorValue;
+	sendMotors();
+
+	const uint32_t start = millis();
+	const uint32_t durationMs = (uint32_t)(duration * 1000.0f);
+	while ((uint32_t)(millis() - start) < durationMs) {
+		serviceDuringMotorNoiseTest();
+	}
+
+	stopMotors();
+	armed = false;
+	setFlightControlPaused(false);
+	printRCDiagnostics();
+	print("RC motor-noise test done\n");
+}
+
+void testRCMotorNoiseOne(int motorId, float motorValue) {
+	if (motorId < 0 || motorId > 3) return;
+	motorValue = constrain(motorValue, 0.0f, 1.0f);
+	print("RC single-motor noise test: motor=%d value=%.2f mapped=%.2f duration=5.0 s. REMOVE PROPS.\n",
+		motorId, motorValue, getMappedMotorOutput(motorId, motorValue));
+
+	armed = false;
+	setFlightControlPaused(true);
+	delay(20);
+	stopMotors();
+	resetRCDiagnostics();
+
+	motors[motorId] = motorValue;
+	sendMotors();
+
+	const uint32_t start = millis();
+	while ((uint32_t)(millis() - start) < 5000) {
+		serviceDuringMotorNoiseTest();
+	}
+
+	stopMotors();
+	armed = false;
+	setFlightControlPaused(false);
+	printRCDiagnostics();
+	print("RC single-motor noise test done\n");
+}
+
+void serviceDuringMotorNoiseTest() {
+	stepFixed(0.002f);
+	readRC();
+#if WIFI_ENABLED
+	processMavlink();
+#endif
+	sendMotors();
+	delay(2);
 }

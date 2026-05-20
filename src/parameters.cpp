@@ -47,18 +47,75 @@ struct Parameter {
 };
 
 // 外部声明，从 control.cpp 引入
-extern float hoverThrottle;
-extern class PID altPid;
-extern class PID velZPid;
+extern float idleThrust;
+extern float idleKickThrust;
+extern float idleKickTime;
+extern float throttleStart;
+extern float idleStickThreshold;
+extern float motorTrimRL;
+extern float motorTrimRR;
+extern float motorTrimFR;
+extern float motorTrimFL;
+extern float motorMinOutput;
+extern float motorTorqueRamp;
+extern float motorTorqueLimit;
+extern float motorYawTorqueLimit;
+extern float idleYawP;
+extern float idleYawD;
+extern float idleYawTorqueLimit;
+extern float idleYawRampTime;
+extern float batteryCompEnable;
+extern float batteryRefVoltage;
+extern float batteryDividerScale;
+extern float rcLossTimeout;
+extern float pwmMidRL;
+extern float pwmMidRR;
+extern float pwmMidFR;
+extern float pwmMidFL;
+extern float pwmMaxRL;
+extern float pwmMaxRR;
+extern float pwmMaxFR;
+extern float pwmMaxFL;
+extern float pwmMinRL;
+extern float pwmMinRR;
+extern float pwmMinFR;
+extern float pwmMinFL;
 
 Parameter parameters[] = {
 	// altitude (定高相关的参数注册，最大名字15个字符)
-	{"ALT_HOVER_THR", &hoverThrottle},
-	{"ALT_POS_P", &altPid.p},
-	{"ALT_VEL_P", &velZPid.p},
-	{"ALT_VEL_I", &velZPid.i},
-	{"ALT_VEL_D", &velZPid.d},
-
+	{"CTL_IDLE_THR", &idleThrust},
+	{"CTL_IDLE_KICK", &idleKickThrust},
+	{"CTL_KICK_TIME", &idleKickTime},
+	{"CTL_START_THR", &throttleStart},
+	{"CTL_IDLE_STK", &idleStickThreshold},
+	{"CTL_TRIM_RL", &motorTrimRL},
+	{"CTL_TRIM_RR", &motorTrimRR},
+	{"CTL_TRIM_FR", &motorTrimFR},
+	{"CTL_TRIM_FL", &motorTrimFL},
+	{"CTL_MOT_MIN", &motorMinOutput},
+	{"CTL_TQ_RAMP", &motorTorqueRamp},
+	{"CTL_TQ_LIMIT", &motorTorqueLimit},
+	{"CTL_Y_LIM", &motorYawTorqueLimit},
+	{"CTL_IDLE_Y_P", &idleYawP},
+	{"CTL_IDLE_Y_D", &idleYawD},
+	{"CTL_IDLE_Y_LIM", &idleYawTorqueLimit},
+	{"CTL_IDLE_Y_RMP", &idleYawRampTime},
+	{"CTL_BAT_COMP", &batteryCompEnable},
+	{"CTL_BAT_REF", &batteryRefVoltage},
+	{"CTL_BAT_SCALE", &batteryDividerScale},
+	{"RC_LOSS_T", &rcLossTimeout},
+	{"PWM_MID_RL", &pwmMidRL},
+	{"PWM_MID_RR", &pwmMidRR},
+	{"PWM_MID_FR", &pwmMidFR},
+	{"PWM_MID_FL", &pwmMidFL},
+	{"PWM_MIN_RL", &pwmMinRL},
+	{"PWM_MIN_RR", &pwmMinRR},
+	{"PWM_MIN_FR", &pwmMinFR},
+	{"PWM_MIN_FL", &pwmMinFL},
+	{"PWM_MAX_RL", &pwmMaxRL},
+	{"PWM_MAX_RR", &pwmMaxRR},
+	{"PWM_MAX_FR", &pwmMaxFR},
+	{"PWM_MAX_FL", &pwmMaxFL},
 	// control
 	{"CTL_R_RATE_P", &rollRatePID.p},
 	{"CTL_R_RATE_I", &rollRatePID.i},
@@ -135,6 +192,13 @@ int parametersCount() {
 const char *getParameterName(int index) {
 	if (index < 0 || index >= parametersCount()) return "";
 	return parameters[index].name;
+}
+
+int getParameterIndex(const char *name) {
+	for (int i = 0; i < parametersCount(); i++) {
+		if (strcmp(parameters[i].name, name) == 0) return i;
+	}
+	return -1;
 }
 
 float getParameter(int index) {

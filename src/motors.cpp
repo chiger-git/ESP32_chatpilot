@@ -10,6 +10,21 @@
 extern float motors[];
 extern void print(const char* format, ...);
 extern void pause(float duration);
+extern bool armed;
+void setFlightControlPaused(bool paused);
+
+float pwmMidRL = 0.50f;
+float pwmMidRR = 0.50f;
+float pwmMidFR = 0.50f;
+float pwmMidFL = 0.50f;
+float pwmMaxRL = 1.00f;
+float pwmMaxRR = 1.00f;
+float pwmMaxFR = 1.00f;
+float pwmMaxFL = 1.00f;
+float pwmMinRL = 0.00f;
+float pwmMinRR = 0.00f;
+float pwmMinFR = 0.00f;
+float pwmMinFL = 0.00f;
 
 #define MOTOR_0_PIN 12 // RL左后rear left
 #define MOTOR_1_PIN 13 // RR右后rear right
@@ -28,6 +43,8 @@ extern const int MOTOR_FRONT_LEFT = 3;
 #define PWM_MAX 1000000 / PWM_FREQUENCY
 
 void sendMotors();
+float mapMotorOutput(float value, float minOutput, float mid, float maxOutput);
+float getMappedMotorOutput(int motorId, float value);
 void setupMotors() {
 	print("Setup Motors\n");
 
@@ -49,11 +66,37 @@ int getDutyCycle(float value) {
 	return round(duty);
 }
 
+float mapMotorOutput(float value, float minOutput, float mid, float maxOutput) {
+	if (value <= 0.0f) return 0.0f;
+	value = constrain(value, 0.0f, 1.0f);
+	const float lowOutput = constrain(minOutput, 0.0f, 1.0f);
+	const float midOutput = max(lowOutput, constrain(mid, 0.0f, 1.0f));
+	const float topOutput = max(midOutput, constrain(maxOutput, 0.0f, 1.0f));
+
+	if (value <= 0.5f) return lowOutput + value * 2.0f * (midOutput - lowOutput);
+	return midOutput + (value - 0.5f) * 2.0f * (topOutput - midOutput);
+}
+
+float getMappedMotorOutput(int motorId, float value) {
+	switch (motorId) {
+		case MOTOR_REAR_LEFT: return mapMotorOutput(value, pwmMinRL, pwmMidRL, pwmMaxRL);
+		case MOTOR_REAR_RIGHT: return mapMotorOutput(value, pwmMinRR, pwmMidRR, pwmMaxRR);
+		case MOTOR_FRONT_RIGHT: return mapMotorOutput(value, pwmMinFR, pwmMidFR, pwmMaxFR);
+		case MOTOR_FRONT_LEFT: return mapMotorOutput(value, pwmMinFL, pwmMidFL, pwmMaxFL);
+		default: return 0.0f;
+	}
+}
+
 void sendMotors() {
-	ledcWrite(MOTOR_0_PIN, getDutyCycle(motors[0]));
-	ledcWrite(MOTOR_1_PIN, getDutyCycle(motors[1]));
-	ledcWrite(MOTOR_2_PIN, getDutyCycle(motors[2]));
-	ledcWrite(MOTOR_3_PIN, getDutyCycle(motors[3]));
+	ledcWrite(MOTOR_0_PIN, getDutyCycle(getMappedMotorOutput(MOTOR_REAR_LEFT, motors[MOTOR_REAR_LEFT])));
+	ledcWrite(MOTOR_1_PIN, getDutyCycle(getMappedMotorOutput(MOTOR_REAR_RIGHT, motors[MOTOR_REAR_RIGHT])));
+	ledcWrite(MOTOR_2_PIN, getDutyCycle(getMappedMotorOutput(MOTOR_FRONT_RIGHT, motors[MOTOR_FRONT_RIGHT])));
+	ledcWrite(MOTOR_3_PIN, getDutyCycle(getMappedMotorOutput(MOTOR_FRONT_LEFT, motors[MOTOR_FRONT_LEFT])));
+}
+
+void stopMotors() {
+	memset(motors, 0, sizeof(float) * 4);
+	sendMotors();
 }
 
 bool motorsActive() {
@@ -61,12 +104,19 @@ bool motorsActive() {
 }
 
 void testMotor(int n) {
+	if (n < 0 || n > 3) return;
 	print("Testing motor %d\n", n);
+	armed = false;
+	setFlightControlPaused(true);
+	delay(20);
+	stopMotors();
 	motors[n] = 1;
 	delay(50); // ESP32 may need to wait until the end of the current cycle to change duty https://github.com/espressif/arduino-esp32/issues/5306
 	sendMotors();
 	pause(3);
 	motors[n] = 0;
 	sendMotors();
+	armed = false;
+	setFlightControlPaused(false);
 	print("Done\n");
 }

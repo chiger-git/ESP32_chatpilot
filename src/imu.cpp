@@ -18,6 +18,9 @@ extern float loopRate;
 // cli.cpp 中的辅助函数
 extern void print(const char* format, ...);
 extern void pause(float duration);
+extern bool armed;
+void setFlightControlPaused(bool paused);
+void stopMotors();
 void configureIMU();
 void rotateIMU(Vector& data);
 void calibrateGyroOnce();
@@ -96,6 +99,10 @@ void calibrateGyroOnce() {
 
 void calibrateAccel() {
 	print("校准陀螺仪加速计Calibrating accelerometer\n");
+	armed = false;
+	setFlightControlPaused(true);
+	delay(20);
+	stopMotors();
 	imu.setAccelRange(imu.ACCEL_RANGE_2G); // the most sensitive mode
 
 	print("1/6 水平放置[8 sec]将飞行器机头朝前（正常飞行方向），底部朝下水平放置在平坦表面，确保完全水平无倾斜\n");
@@ -120,6 +127,9 @@ void calibrateAccel() {
 	printIMUCalibration();
 	print("✓校准完成Calibration done!\n");
 	configureIMU();
+	stopMotors();
+	armed = false;
+	setFlightControlPaused(false);
 }
 
 void calibrateAccelOnce() {
@@ -134,6 +144,7 @@ void calibrateAccelOnce() {
 		Vector sample;
 		imu.getAccel(sample.x, sample.y, sample.z);
 		acc = acc + sample;
+		if ((i & 31) == 31) yield();
 	}
 	acc = acc / samples;
 

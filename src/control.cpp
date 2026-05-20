@@ -1,7 +1,6 @@
 // Copyright (c) 2023 Oleg Kalachev <okalachev@gmail.com>
 // Repository: https://github.com/okalachev/flix
-// 飞行控制Flight control，注释修改：B站微辣火龙果 https://space.bilibili.com/544479100
-// 嘉立创开源项目：ESP32迷你无人机 https://oshwhub.com/malagis/esp32-mini-plane
+// Flight attitude/rate control and motor mixing.
 
 #include <Arduino.h>
 #include "vector.h"
@@ -10,73 +9,87 @@
 #include "lpf.h"
 #include "util.h"
 
-// 高度闭环数据与 PID 初始化
-extern float alt_est; 
-extern float vz_est;
-bool alt_hold_enabled = false;  // 定高开关
-float alt_target = 0.0f;        // 目标高度 (m)
-float hoverThrottle = 0.35f;    // 基础悬停油门
-
-PID altPid(1.0f, 0.0f, 0.0f);   // 外部位置环 (高度误差 -> 目标爬升速度)
-PID velZPid(0.1f, 0.01f, 0.0f); // 内部速度环 (速度误差 -> 增补油门)
+float idleThrust = 0.1f;
+float idleKickThrust = 0.04f;
+float idleKickTime = 0.20f;
+float throttleStart = 0.35f;
+float idleStickThreshold = 0.05f;
+float motorTrimRL = 0.0f;
+float motorTrimRR = 0.0f;
+float motorTrimFR = 0.0f;
+float motorTrimFL = 0.0f;
+float motorMinOutput = 0.18f;
+float motorTorqueRamp = 0.15f;
+float motorTorqueLimit = 0.25f;
+float motorYawTorqueLimit = 0.0f;
+float idleYawP = 0.010f;
+float idleYawD = 0.008f;
+float idleYawTorqueLimit = 0.010f;
+float idleYawRampTime = 0.80f;
+float batteryCompEnable = 1.0f;
+float batteryRefVoltage = 3.80f;
+float batteryDividerScale = 43.0f / 33.0f;
+float batteryVoltage = NAN;
+float batteryVoltageMin = NAN;
 
 extern Quaternion attitude;
 extern Vector rates;
 extern float motors[4];
-extern float t; // 时间
-
-// 外部变量与函数声明
-// 来自 main.cpp
-extern Quaternion attitude;
-extern Vector rates;
-extern float motors[4];
-extern float t; // 时间
-extern float dt; // 时间步长，给PID积分和微分用
-// 来自 rc.cpp
+extern float t;
+extern float dt;
 extern float controlRoll, controlPitch, controlThrottle, controlYaw, controlMode;
-// 来自 motors.cpp (电机索引常量)
 extern const int MOTOR_REAR_LEFT;
 extern const int MOTOR_REAR_RIGHT;
 extern const int MOTOR_FRONT_RIGHT;
 extern const int MOTOR_FRONT_LEFT;
 
-// 内部函数前向声明
 void interpretControls();
-void failsafe(); // 原代码漏了这个函数的实现？如果没实现需要删掉或者补上
+void failsafe();
 void controlAttitude();
 void controlRates();
 void controlTorque();
+float getTorqueScale();
+bool isIdleThrottle();
+float getBatteryCompensationScale(bool allowBoost = true);
+float getMotorSpinMin();
+Vector limitTorqueForMotorRange(const Vector& torque, float baseThrust, float minOutput);
+void resetRateIntegrators();
+void updateBatteryVoltage();
+float getIdleYawTorque();
+void resetIdleYawHold(float startTime = NAN);
+float limitIdleYawTorque(float yawTorque, float baseRL, float baseRR, float baseFR, float baseFL);
+void applyMotorIdleOutput(float extraThrust = 0.0f, float yawTorque = 0.0f);
+void applyMotorOutputAdjustments(float minOutput);
 
-// ============== 角速率环（内环）参数 ==============
-#define PITCHRATE_P 0.05 // 增大P值提高响应速度
-#define PITCHRATE_I 0.2 // 中等I值补偿电机差异
-#define PITCHRATE_D 0.001 // 小D值抑制震荡
-#define PITCHRATE_I_LIM 0.35 // 限制积分积累
-#define ROLLRATE_P 0.06 // 横滚和俯仰使用相同参数
-#define ROLLRATE_I PITCHRATE_I 
-#define ROLLRATE_D 0.02 
+#define PITCHRATE_P 0.05f
+#define PITCHRATE_I 0.2f
+#define PITCHRATE_D 0.001f
+#define PITCHRATE_I_LIM 0.35f
+#define ROLLRATE_P 0.06f
+#define ROLLRATE_I PITCHRATE_I
+#define ROLLRATE_D 0.02f
 #define ROLLRATE_I_LIM PITCHRATE_I_LIM
-#define YAWRATE_P 0.4 // 偏航需要更高的P值（惯性较小）
-#define YAWRATE_I 0.01 // 中等I值补偿
-#define YAWRATE_D 0.01 // 小D值
-#define YAWRATE_I_LIM 0.3
-// ============== 角度环（外环）参数 ==============
-#define ROLL_P 7 // 较高的P值快速响应
-#define ROLL_I 0 // 角度环通常不需要I项
-#define ROLL_D 0 // 角度环通常不需要D项
-#define PITCH_P ROLL_P // 横滚和俯仰相同
+#define YAWRATE_P 0.4f
+#define YAWRATE_I 0.01f
+#define YAWRATE_D 0.0f
+#define YAWRATE_I_LIM 0.3f
+
+#define ROLL_P 7.0f
+#define ROLL_I 0.0f
+#define ROLL_D 0.0f
+#define PITCH_P ROLL_P
 #define PITCH_I ROLL_I
 #define PITCH_D ROLL_D
-#define YAW_P 3 // 偏航响应稍慢
+#define YAW_P 3.0f
 
-// ============== 限制值 ==============
-#define PITCHRATE_MAX radians(360) // 高转速限制（1000°/s）
+#define PITCHRATE_MAX radians(360)
 #define ROLLRATE_MAX radians(360)
-#define YAWRATE_MAX radians(300) // 偏航转速稍低
-#define TILT_MAX radians(30) // 最大倾斜角30°
-#define RATES_D_LPF_ALPHA 0.2 // cutoff frequency ~ 40 Hz
+#define YAWRATE_MAX radians(300)
+#define TILT_MAX radians(30)
+#define RATES_D_LPF_ALPHA 0.2f
+#define ARM_GESTURE_HOLD 0.25f
+#define DISARM_GESTURE_HOLD 0.06f
 
-// 飞行模式常量
 extern const int RAW = 0;
 extern const int ACRO = 1;
 extern const int STAB = 2;
@@ -84,8 +97,8 @@ extern const int AUTO = 3;
 
 int mode = STAB;
 bool armed = false;
+const char *lastStopReason = "not armed";
 
-// PID 对象实例化
 PID rollRatePID(ROLLRATE_P, ROLLRATE_I, ROLLRATE_D, ROLLRATE_I_LIM, RATES_D_LPF_ALPHA);
 PID pitchRatePID(PITCHRATE_P, PITCHRATE_I, PITCHRATE_D, PITCHRATE_I_LIM, RATES_D_LPF_ALPHA);
 PID yawRatePID(YAWRATE_P, YAWRATE_I, YAWRATE_D);
@@ -95,97 +108,98 @@ PID yawPID(YAW_P, 0, 0);
 Vector maxRate(ROLLRATE_MAX, PITCHRATE_MAX, YAWRATE_MAX);
 float tiltMax = TILT_MAX;
 
-// 目标状态量
 Quaternion attitudeTarget;
 Vector ratesTarget;
-Vector ratesExtra; // feedforward rates
+Vector ratesExtra;
 Vector torqueTarget;
 float thrustTarget;
-
-extern const int MOTOR_REAR_LEFT, MOTOR_REAR_RIGHT, MOTOR_FRONT_RIGHT, MOTOR_FRONT_LEFT;
-extern float controlRoll, controlPitch, controlThrottle, controlYaw, controlMode;
+float idleYawTarget = NAN;
+float idleYawControlStart = 0.0f;
 
 void control() {
 	interpretControls();
 	failsafe();
+	updateBatteryVoltage();
 	controlAttitude();
 	controlRates();
 	controlTorque();
 }
 
 void interpretControls() {
-	if (controlMode < 0.25) mode = STAB;
-	if (controlMode < 0.75) mode = STAB;
-	if (controlMode > 0.75) mode = STAB;
-
-	if (mode == AUTO) return; // pilot is not effective in AUTO mode
-
-	if (controlThrottle < 0.05 && controlYaw > 0.95) armed = true; // arm gesture
-	if (controlThrottle < 0.05 && controlYaw < -0.95) armed = false; // disarm gesture
-
-	if (abs(controlYaw) < 0.1) controlYaw = 0; // yaw dead zone
-
-// 先把高度环注释掉了，后面有需要再加
-	// ====================== Altitude Hold Core ======================
-	if (false && alt_hold_enabled) {
-		// Panic switch: Exit altitude hold if throttle is pulled down or drone is disarmed
-		if (controlThrottle < 0.05f || !armed) {
-			alt_hold_enabled = false;
-		} 
-		else {
-			// Position outer loop: calculate target vertical velocity
-			float pos_err = alt_target - alt_est;                  
-			float target_speed = altPid.update(pos_err);       
-			target_speed = constrain(target_speed, -0.6f, 0.6f);   // Limit climb/descent rate
-
-			// Velocity inner loop: calculate throttle adjustment
-			float speed_err = target_speed - vz_est;               
-			float hover_adj = velZPid.update(speed_err);       
-
-			// Feedforward base + PID compensation
-			thrustTarget = hoverThrottle + hover_adj;
-			thrustTarget = constrain(thrustTarget, 0.1f, 0.8f);    // Keep motors spinning but prevent aggressive saturation
-		}
-	} 
-
-	// Revert to manual if disabled
-	if (!alt_hold_enabled) {
-		thrustTarget = controlThrottle;
-		
-		// Reset PIDs to prevent integral windup on re-engagement
-		altPid.reset();
-		velZPid.reset();
+	static float armGestureStart = NAN;
+	static float disarmGestureStart = NAN;
+	const bool throttleValid = valid(controlThrottle);
+	if (invalid(controlRoll)) controlRoll = 0.0f;
+	if (invalid(controlPitch)) controlPitch = 0.0f;
+	if (invalid(controlYaw)) controlYaw = 0.0f;
+	if (invalid(controlThrottle)) controlThrottle = 0.0f;
+	if (!throttleValid) {
+		if (armed) lastStopReason = "RC throttle invalid";
+		armed = false;
 	}
-	// ==============================================================
+	controlThrottle = constrain(controlThrottle, 0.0f, 1.0f);
+	if (mode != STAB) mode = STAB;
+
+	const bool armGesture = controlThrottle < 0.05f && controlYaw > 0.95f;
+	const bool disarmGesture = controlThrottle < 0.05f && controlYaw < -0.95f;
+
+	if (armGesture) {
+		if (!isfinite(armGestureStart)) armGestureStart = t;
+		if (t - armGestureStart >= ARM_GESTURE_HOLD) armed = true;
+	} else {
+		armGestureStart = NAN;
+	}
+
+	if (disarmGesture) {
+		if (!isfinite(disarmGestureStart)) disarmGestureStart = t;
+		if (t - disarmGestureStart >= DISARM_GESTURE_HOLD) {
+			if (armed) lastStopReason = "RC disarm gesture";
+			armed = false;
+		}
+	} else {
+		disarmGestureStart = NAN;
+	}
+
+	if (abs(controlYaw) < 0.1f) controlYaw = 0.0f;
+
+	thrustTarget = controlThrottle;
+	if (invalid(thrustTarget)) thrustTarget = 0.0f;
 
 	if (mode == STAB) {
 		float yawTarget = attitudeTarget.getYaw();
-		if (!armed || invalid(yawTarget) || controlYaw != 0) yawTarget = attitude.getYaw(); // reset yaw target
+		if (!armed || invalid(yawTarget) || controlYaw != 0.0f || isIdleThrottle()) {
+			yawTarget = attitude.getYaw();
+		}
 		attitudeTarget = Quaternion::fromEuler(Vector(controlRoll * tiltMax, controlPitch * tiltMax, yawTarget));
-		ratesExtra = Vector(0, 0, -controlYaw * maxRate.z); // positive yaw stick means clockwise rotation in FLU
+		ratesExtra = Vector(0, 0, -controlYaw * maxRate.z);
 	}
 
 	if (mode == ACRO) {
-		attitudeTarget.invalidate(); // skip attitude control
+		attitudeTarget.invalidate();
 		ratesTarget.x = controlRoll * maxRate.x;
 		ratesTarget.y = controlPitch * maxRate.y;
-		ratesTarget.z = -controlYaw * maxRate.z; // positive yaw stick means clockwise rotation in FLU
+		ratesTarget.z = -controlYaw * maxRate.z;
 	}
 
-	if (mode == RAW) { // direct torque control
-		attitudeTarget.invalidate(); // skip attitude control
-		ratesTarget.invalidate(); // skip rate control
-		torqueTarget = Vector(controlRoll, controlPitch, -controlYaw) * 0.1;
+	if (mode == RAW) {
+		attitudeTarget.invalidate();
+		ratesTarget.invalidate();
+		torqueTarget = Vector(controlRoll, controlPitch, -controlYaw) * 0.1f;
 	}
 }
 
 void controlAttitude() {
-	if (!armed || attitudeTarget.invalid() || thrustTarget < 0.1) return; // skip attitude control
+	if (!armed || attitudeTarget.invalid() || isIdleThrottle()) {
+		rollPID.reset();
+		pitchPID.reset();
+		yawPID.reset();
+		ratesTarget.invalidate();
+		return;
+	}
 
 	const Vector up(0, 0, 1);
 	Vector upActual = Quaternion::rotateVector(up, attitude);
 	Vector upTarget = Quaternion::rotateVector(up, attitudeTarget);
-
 	Vector error = Vector::rotationVectorBetween(upTarget, upActual);
 
 	ratesTarget.x = rollPID.update(error.x) + ratesExtra.x;
@@ -195,43 +209,205 @@ void controlAttitude() {
 	ratesTarget.z = yawPID.update(yawError) + ratesExtra.z;
 }
 
-
 void controlRates() {
-	if (!armed || ratesTarget.invalid() || thrustTarget < 0.1) return; // skip rates control
+	if (mode == RAW) return;
+
+	const float torqueScale = getTorqueScale();
+	if (!armed || ratesTarget.invalid() || isIdleThrottle() || torqueScale <= 0.0f) {
+		rollRatePID.reset();
+		pitchRatePID.reset();
+		yawRatePID.reset();
+		torqueTarget = Vector(0, 0, 0);
+		return;
+	}
+	if (torqueScale < 0.99f) resetRateIntegrators();
 
 	Vector error = ratesTarget - rates;
 
-	// Calculate desired torque, where 0 - no torque, 1 - maximum possible torque
 	torqueTarget.x = rollRatePID.update(error.x);
 	torqueTarget.y = pitchRatePID.update(error.y);
 	torqueTarget.z = yawRatePID.update(error.z);
+	torqueTarget.x = constrain(torqueTarget.x, -motorTorqueLimit, motorTorqueLimit) * torqueScale;
+	torqueTarget.y = constrain(torqueTarget.y, -motorTorqueLimit, motorTorqueLimit) * torqueScale;
+	torqueTarget.z = constrain(torqueTarget.z, -motorYawTorqueLimit, motorYawTorqueLimit) * torqueScale;
 }
 
 void controlTorque() {
-	if (!torqueTarget.valid()) return; // skip torque control
+	static bool wasArmed = false;
+	static float idleKickUntil = 0.0f;
+
+	if (!torqueTarget.valid()) return;
 
 	if (!armed) {
-		memset(motors, 0, sizeof(motors)); // stop motors if disarmed
+		memset(motors, 0, sizeof(motors));
+		wasArmed = false;
+		resetIdleYawHold();
 		return;
 	}
 
-	if (thrustTarget < 0.1) {
-		motors[0] = 0.1; // idle thrust
-		motors[1] = 0.1;
-		motors[2] = 0.1;
-		motors[3] = 0.1;
+	if (!wasArmed) {
+		idleKickUntil = t + max(idleKickTime, 0.0f);
+		resetIdleYawHold(idleKickUntil);
+		wasArmed = true;
+	}
+
+	if (isIdleThrottle()) {
+		float extra = t < idleKickUntil ? max(idleKickThrust, 0.0f) : 0.0f;
+		applyMotorIdleOutput(extra, getIdleYawTorque());
 		return;
 	}
 
-	motors[MOTOR_FRONT_LEFT] = thrustTarget + torqueTarget.x - torqueTarget.y + torqueTarget.z;
-	motors[MOTOR_FRONT_RIGHT] = thrustTarget - torqueTarget.x - torqueTarget.y - torqueTarget.z;
-	motors[MOTOR_REAR_LEFT] = thrustTarget + torqueTarget.x + torqueTarget.y - torqueTarget.z;
-	motors[MOTOR_REAR_RIGHT] = thrustTarget - torqueTarget.x + torqueTarget.y + torqueTarget.z;
+	const float spinMin = getMotorSpinMin();
+	const float baseThrust = max(thrustTarget, spinMin);
+	Vector limitedTorque = limitTorqueForMotorRange(torqueTarget, baseThrust, spinMin);
+
+	motors[MOTOR_FRONT_LEFT] = baseThrust + limitedTorque.x - limitedTorque.y + limitedTorque.z;
+	motors[MOTOR_FRONT_RIGHT] = baseThrust - limitedTorque.x - limitedTorque.y - limitedTorque.z;
+	motors[MOTOR_REAR_LEFT] = baseThrust + limitedTorque.x + limitedTorque.y - limitedTorque.z;
+	motors[MOTOR_REAR_RIGHT] = baseThrust - limitedTorque.x + limitedTorque.y + limitedTorque.z;
 
 	motors[0] = constrain(motors[0], 0, 1);
 	motors[1] = constrain(motors[1], 0, 1);
 	motors[2] = constrain(motors[2], 0, 1);
 	motors[3] = constrain(motors[3], 0, 1);
+	applyMotorOutputAdjustments(getMotorSpinMin());
+}
+
+float getTorqueScale() {
+	if (motorTorqueRamp <= 0.0f) return 1.0f;
+	return constrain((thrustTarget - getMotorSpinMin()) / motorTorqueRamp, 0.0f, 1.0f);
+}
+
+bool isIdleThrottle() {
+	return invalid(thrustTarget) || thrustTarget <= constrain(idleStickThreshold, 0.0f, 0.25f);
+}
+
+float getIdleYawTorque() {
+	const float currentYaw = attitude.getYaw();
+	if (!isfinite(currentYaw) || !isfinite(rates.z)) return 0.0f;
+	if (idleYawTorqueLimit <= 0.0f) {
+		idleYawTarget = currentYaw;
+		return 0.0f;
+	}
+
+	if (abs(controlYaw) > 0.10f) {
+		idleYawTarget = currentYaw;
+		return 0.0f;
+	}
+
+	if (!isfinite(idleYawTarget)) idleYawTarget = currentYaw;
+
+	const float rampTime = max(idleYawRampTime, 0.0f);
+	const float ramp = rampTime > 0.0f ? constrain((t - idleYawControlStart) / rampTime, 0.0f, 1.0f) : 1.0f;
+	if (ramp <= 0.0f) return 0.0f;
+
+	const float yawError = wrapAngle(idleYawTarget - currentYaw);
+	const float yawTorque = yawError * idleYawP - rates.z * idleYawD;
+	return constrain(yawTorque, -idleYawTorqueLimit, idleYawTorqueLimit) * ramp;
+}
+
+void resetIdleYawHold(float startTime) {
+	const float currentYaw = attitude.getYaw();
+	idleYawTarget = isfinite(currentYaw) ? currentYaw : NAN;
+	idleYawControlStart = isfinite(startTime) ? startTime : t;
+}
+
+float limitIdleYawTorque(float yawTorque, float baseRL, float baseRR, float baseFR, float baseFL) {
+	const float minYaw = max(max(baseRL - 1.0f, baseFR - 1.0f), max(-baseRR, -baseFL));
+	const float maxYaw = min(min(baseRL, baseFR), min(1.0f - baseRR, 1.0f - baseFL));
+	if (minYaw > maxYaw) return 0.0f;
+	return constrain(yawTorque, minYaw, maxYaw);
+}
+
+float getBatteryCompensationScale(bool allowBoost) {
+	updateBatteryVoltage();
+	if (batteryCompEnable < 0.5f) return 1.0f;
+	if (!isfinite(batteryVoltage) || batteryVoltage < 2.5f || batteryVoltage > 5.0f) return 1.0f;
+
+	const float maxScale = allowBoost ? 1.20f : 1.0f;
+	return constrain(batteryRefVoltage / batteryVoltage, 0.60f, maxScale);
+}
+
+float getMotorSpinMin() {
+	return constrain(max(motorMinOutput, idleThrust), 0.0f, 1.0f);
+}
+
+Vector limitTorqueForMotorRange(const Vector& torque, float baseThrust, float minOutput) {
+	if (torque.invalid()) return Vector(0, 0, 0);
+
+	float scale = 1.0f;
+	const float lowRoom = max(baseThrust - minOutput, 0.0f);
+	const float highRoom = max(1.0f - baseThrust, 0.0f);
+	const float deviations[4] = {
+		torque.x - torque.y + torque.z,
+		-torque.x - torque.y - torque.z,
+		torque.x + torque.y - torque.z,
+		-torque.x + torque.y + torque.z,
+	};
+
+	for (float deviation : deviations) {
+		if (deviation < 0.0f) {
+			scale = min(scale, lowRoom / -deviation);
+		} else if (deviation > 0.0f) {
+			scale = min(scale, highRoom / deviation);
+		}
+	}
+
+	return torque * constrain(scale, 0.0f, 1.0f);
+}
+
+void resetRateIntegrators() {
+	rollRatePID.integral = 0.0f;
+	pitchRatePID.integral = 0.0f;
+	yawRatePID.integral = 0.0f;
+}
+
+void updateBatteryVoltage() {
+	const int BATTERY_ADC_PIN = 36; // ESP32 VP / ADC1_CH0, net name ADC_1
+	static bool configured = false;
+	static Rate rate(20);
+
+	if (!configured) {
+		analogReadResolution(12);
+		analogSetPinAttenuation(BATTERY_ADC_PIN, ADC_11db);
+		configured = true;
+	}
+	if (!rate) return;
+
+	const float measured = analogReadMilliVolts(BATTERY_ADC_PIN) * 0.001f * batteryDividerScale;
+	if (measured < 2.0f || measured > 5.5f) return;
+
+	if (!isfinite(batteryVoltage)) {
+		batteryVoltage = measured;
+	} else {
+		batteryVoltage = batteryVoltage * 0.90f + measured * 0.10f;
+	}
+	if (!isfinite(batteryVoltageMin) || batteryVoltage < batteryVoltageMin) batteryVoltageMin = batteryVoltage;
+}
+
+void applyMotorIdleOutput(float extraThrust, float yawTorque) {
+	const float scale = getBatteryCompensationScale(false);
+	const float baseRL = idleThrust + extraThrust + motorTrimRL;
+	const float baseRR = idleThrust + extraThrust + motorTrimRR;
+	const float baseFR = idleThrust + extraThrust + motorTrimFR;
+	const float baseFL = idleThrust + extraThrust + motorTrimFL;
+	const float yaw = limitIdleYawTorque(yawTorque, baseRL, baseRR, baseFR, baseFL);
+	const float minIdleOutput = getMotorSpinMin();
+
+	motors[MOTOR_REAR_LEFT] = constrain((baseRL - yaw) * scale, minIdleOutput, 1.0f);
+	motors[MOTOR_REAR_RIGHT] = constrain((baseRR + yaw) * scale, minIdleOutput, 1.0f);
+	motors[MOTOR_FRONT_RIGHT] = constrain((baseFR - yaw) * scale, minIdleOutput, 1.0f);
+	motors[MOTOR_FRONT_LEFT] = constrain((baseFL + yaw) * scale, minIdleOutput, 1.0f);
+}
+
+void applyMotorOutputAdjustments(float minOutput) {
+	const float scale = getBatteryCompensationScale();
+	const float minFinalOutput = constrain(minOutput, 0.0f, 1.0f);
+
+	motors[MOTOR_REAR_LEFT] = constrain((motors[MOTOR_REAR_LEFT] + motorTrimRL) * scale, minFinalOutput, 1.0f);
+	motors[MOTOR_REAR_RIGHT] = constrain((motors[MOTOR_REAR_RIGHT] + motorTrimRR) * scale, minFinalOutput, 1.0f);
+	motors[MOTOR_FRONT_RIGHT] = constrain((motors[MOTOR_FRONT_RIGHT] + motorTrimFR) * scale, minFinalOutput, 1.0f);
+	motors[MOTOR_FRONT_LEFT] = constrain((motors[MOTOR_FRONT_LEFT] + motorTrimFL) * scale, minFinalOutput, 1.0f);
 }
 
 const char* getModeName() {

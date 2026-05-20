@@ -73,6 +73,25 @@ public:
 	}
 };
 
+// Rate limiter based on real wall-clock time.
+// Use this for service links that must keep running while flight time t is paused.
+class WallRate {
+public:
+	float rate;
+	uint32_t last = 0;
+	WallRate(float rate) : rate(rate) {}
+
+	operator bool() {
+		const uint32_t now = millis();
+		const uint32_t periodMs = (uint32_t)(1000.0f / rate);
+		if ((uint32_t)(now - last) >= periodMs) {
+			last = now;
+			return true;
+		}
+		return false;
+	}
+};
+
 // Delay filter for boolean signals - ensures the signal is on for at least 'delay' seconds
 class Delay {
 public:
